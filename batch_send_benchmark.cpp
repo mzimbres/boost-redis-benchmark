@@ -3,6 +3,8 @@
 #include <boost/redis/src.hpp>
 #include <thread>
 
+namespace asio = boost::asio;
+
 constexpr auto usage_str = R"(
 Usage: batch_send_benchmark [n_req [payload_size]]
     nreq: number of requests sent in a batch, default 800.
@@ -17,23 +19,20 @@ namespace redis
         {
         public:
             BatchSendBenchmark(int n_req, int payload_size)
-                : _conn(std::make_shared<boost::redis::connection>(_ctx)), _n_req(n_req), _payload_size(payload_size), _s("separate", "s.hash", n_req), _c("combined", "c.hash", 1)
+                : _n_req(n_req), _payload_size(payload_size), _s("separate", "s.hash", n_req), _c("combined", "c.hash", 1)
             {
-            }
-            ~BatchSendBenchmark()
-            {
-                stop();
             }
             void run(bool run_s, bool run_c)
             {
-                _thread = std::jthread([this]()
-                                       { _ctx.run(); });
+               boost::asio::io_context _ctx{1};
+               auto _conn = std::make_shared<boost::redis::connection>(_ctx); 
+
                 // Turn off health check.
                 boost::redis::config cfg;
                 cfg.health_check_interval = std::chrono::seconds(0);
                 _conn->async_run(cfg,
                                  {boost::redis::logger::level::debug},
-                                 [_conn = this->_conn](boost::system::error_code ec)
+                                 [_conn](boost::system::error_code ec)
                                  {
                                      if (ec)
                                      {
@@ -46,17 +45,12 @@ namespace redis
                 prepare();
                 // run N requests to redis.
                 if (run_s)
-                    runSeparateRequests();
+                    runSeparateRequests(_conn);
                 // run one combined request.
                 if (run_c)
-                    runCombinedRequests();
-                // wait for completion.
-                waitForCompletion();
-            }
-            void stop()
-            {
-                _conn->cancel();
-                _ctx.stop();
+                    runCombinedRequests(_conn);
+
+                _ctx.run();
             }
 
         protected:
@@ -97,13 +91,13 @@ namespace redis
                 _s.clear();
                 _c.clear();
             }
-            void runSeparateRequests()
+            void runSeparateRequests(std::shared_ptr<boost::redis::connection> _conn)
             {
                 std::cout << "Separate stream BM start" << std::endl;
-                runSeparateRequestsOnce();
+                runSeparateRequestsOnce(_conn);
                 std::cout << "Separate stream BM ends" << std::endl;
             }
-            void runSeparateRequestsOnce()
+            void runSeparateRequestsOnce(std::shared_ptr<boost::redis::connection> _conn)
             {
                 _s.started = true;
                 for (int i = 0; i < _n_req; ++i)
@@ -113,23 +107,27 @@ namespace redis
                     request->push("HSET", _s.hash, std::to_string(i), payload());
                     _conn->async_exec(*request,
                                       boost::redis::ignore,
-                                      [this, request](boost::system::error_code ec, size_t)
+                                      [this, _conn, request](boost::system::error_code ec, size_t)
                                       {
                                           if (ec)
                                           {
                                               ++_s.errors;
                                           }
                                           ++_s.done;
+                                          if (_c.completed() && _s.completed()) {
+                                              std::cout << "Separated done" << std::endl;
+                                              _conn->cancel();
+                                          }
                                       });
                 }
             }
-            void runCombinedRequests()
+            void runCombinedRequests(std::shared_ptr<boost::redis::connection> _conn)
             {
                 std::cout << "Combined stream BM start" << std::endl;
-                runCombinedRequestsOnce();
+                runCombinedRequestsOnce(_conn);
                 std::cout << "Combined stream BM ends" << std::endl;
             }
-            void runCombinedRequestsOnce()
+            void runCombinedRequestsOnce(std::shared_ptr<boost::redis::connection> _conn)
             {
                 _c.started = true;
                 auto request = std::make_shared<boost::redis::request>();
@@ -140,23 +138,18 @@ namespace redis
 
                 _conn->async_exec(*request,
                                   boost::redis::ignore,
-                                  [this, request](boost::system::error_code ec, size_t)
+                                  [this, _conn, request](boost::system::error_code ec, size_t)
                                   {
                                       if (ec)
                                       {
                                           ++_c.errors;
                                       }
                                       ++_c.done;
+                                       if (_c.completed() && _s.completed()) {
+                                           std::cout << "Combined done" << std::endl;
+                                           _conn->cancel();
+                                       }
                                   });
-            }
-            void waitForCompletion()
-            {
-                while (!_s.completed() || !_c.completed())
-                {
-                    std::cout << "Waiting for completion: " << _s.status() << " " << _c.status() << "..." << std::endl;
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                }
-                std::cout << "Finished: " << _s.status() << " " << _c.status() << std::endl;
             }
             std::string payload()
             {
@@ -164,9 +157,6 @@ namespace redis
             }
 
         private:
-            boost::asio::io_context _ctx{1};
-            std::jthread _thread;
-            std::shared_ptr<boost::redis::connection> _conn;
             int _n_req;
             int _payload_size;
             Config _s;
@@ -191,21 +181,18 @@ int main(int argc, char *argv[])
         std::cout << "Starting BMs with separate requests..." << std::endl;
         b.run(true, false);
         std::cout << "BM with separate requests done" << std::endl;
-        b.stop();
     }
     {
         redis::BatchSendBenchmark b(n_req, payload_size);
         std::cout << "Starting BMs with combined requests..." << std::endl;
         b.run(false, true);
         std::cout << "BM with combined requests done" << std::endl;
-        b.stop();
     }
     {
         redis::BatchSendBenchmark b(n_req, payload_size);
         std::cout << "Starting BMs with both kinds of requests..." << std::endl;
         b.run(true, true);
         std::cout << "BM with both kinds of requests done" << std::endl;
-        b.stop();
     }
     return 0;
 }

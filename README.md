@@ -60,3 +60,7 @@ where
 All the boilerplate aside, this benchmark sends the requests to Redis in two ways. In the `separate` part, in function `runSeparateRequestsOnce()`, all the requests are sent for execution independently. In the `combined` part, in function `runCombinedRequestsOnce()`, all the `HSET` commands are put into the same request, which is then sent for execution.
 
 The benchmark does three runs in a row: the first one contains only separate part, the second one contains only conbimed part, and the last one contains both parts.
+
+```
+BOOST_ROOT=/opt/boost-dev/ cmake . -DCMAKE_PREFIX_PATH=/opt/boost-dev/lib/cmake
+```
